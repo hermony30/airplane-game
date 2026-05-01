@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>飛行機操縦ゲーム - A350 Long Flight</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #87ceeb; font-family: 'Segoe UI', sans-serif; }
+        .overlay {
+            position: absolute; width: 100%; height: 100%;
+            background: linear-gradient(135deg, rgba(135, 206, 235, 0.8), rgba(30, 144, 255, 0.7));
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            z-index: 100; color: white; text-align: center;
+        }
+        h1 { font-size: 55px; margin-bottom: 10px; font-weight: bold; }
+        .btn {
+            width: 320px; padding: 18px; margin: 10px; font-size: 20px;
+            cursor: pointer; border: 2px solid white; border-radius: 50px; 
+            transition: 0.3s; font-weight: bold; background: rgba(255, 255, 255, 0.2); color: white;
+        }
+        .btn:hover { background: white; color: #1e90ff; transform: scale(1.05); }
+        #ui { position: absolute; top: 25px; left: 25px; color: white; font-size: 26px; display: none; font-weight: bold; }
+        #progress-container { position: absolute; top: 30px; right: 30px; width: 250px; height: 14px; background: rgba(255,255,255,0.4); border-radius: 20px; display: none; overflow: hidden; border: 1px solid white; }
+        #progress-bar { width: 0%; height: 100%; background: #ffffff; }
+    </style>
+</head>
+<body>
+
+    <div id="menu" class="overlay">
+        <h1>飛行機操縦ゲーム</h1>
+        <p>東京から目的地まで、A350で長距離フライトに出発！</p>
+        <!-- 距離を大幅に増やしました（例：3000, 8000, 15000） -->
+        <button class="btn" onclick="startGame(1.2, 4000, 15)">簡単コース (約2分)</button>
+        <button class="btn" onclick="startGame(2.0, 9000, 10)">普通コース (約3分強)</button>
+        <button class="btn" onclick="startGame(3.0, 18000, 7)">難しいコース (約5分・超長距離)</button>
+    </div>
+
+    <div id="result" class="overlay" style="display: none;">
+        <h1>FLIGHT COMPLETE!</h1>
+        <p id="final-score" style="font-size: 35px;"></p>
+        <button class="btn" onclick="location.reload()">タイトルへ戻る</button>
+    </div>
+
+    <div id="ui">SCORE: <span id="score">0</span></div>
+    <div id="progress-container"><div id="progress-bar"></div></div>
+    
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        let gameStarted = false;
+        let speed = 0;
+        let score = 0;
+        let goalDistance = 0;
+        let ringRadius = 5;
+        const keys = {};
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87ceeb);
+        // フォグの範囲を広げて遠くの景色が見えるように調整
+        scene.fog = new THREE.Fog(0x87ceeb, 300, 1500);
+
+        const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 4000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+        sun.position.set(200, 400, 100);
+        scene.add(sun);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+
+        // --- A350 機体 ---
+        const airplane = new THREE.Group();
+        const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+        const airplaneBody = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 5, 16), bodyMat);
+        airplaneBody.rotation.x = Math.PI / 2;
+        airplane.add(airplaneBody);
+        const wing = new THREE.Mesh(new THREE.BoxGeometry(8, 0.1, 1.8), bodyMat);
+        airplane.add(wing);
+        const tail = new THREE.Mesh(new THREE.BoxGeometry(0.05, 1.5, 1.2), new THREE.MeshStandardMaterial({color: 0x003399}));
+        tail.position.set(0, 0.8, -2.2);
+        airplane.add(tail);
+        scene.add(airplane);
+        airplane.position.y = 60;
+
+        // --- 東京の街並み（さらに広大に） ---
+        const cityGroup = new THREE.Group();
+        const buildGeo = new THREE.BoxGeometry(1, 1, 1);
+        for (let i = 0; i < 500; i++) {
+            const h = Math.random() * 40 + 10;
+            const buildMat = new THREE.MeshStandardMaterial({ color: 0xdddddd });
+            const build = new THREE.Mesh(buildGeo, buildMat);
+            const xPos = (Math.random() > 0.5 ? 1 : -1) * (Math.random() * 300 + 60);
+            build.position.set(xPos, h/2, -Math.random() * 8000);
+            build.scale.set(20, h, 20);
+            cityGroup.add(build);
+        }
+        scene.add(cityGroup);
+
+        // --- 地面 ---
+        const groundGeo = new THREE.PlaneGeometry(4000, 10000);
+        const groundMat = new THREE.MeshStandardMaterial({ color: 0xaaaaaa });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        scene.add(ground);
+
+        // --- リング管理 ---
+        let rings = [];
+        function createRings(radius) {
+            rings.forEach(r => scene.remove(r));
+            rings = [];
+            const ringGeo = new THREE.TorusGeometry(radius, 0.6, 12, 48);
+            const ringMat = new THREE.MeshToonMaterial({ color: 0xffd700 });
+            for (let i = 0; i < 30; i++) { // 画面上のリング数を少し増加
+                const ring = new THREE.Mesh(ringGeo, ringMat);
+                resetRing(ring, -500 - (i * 200)); // 間隔を広げて長距離に対応
+                scene.add(ring);
+                rings.push(ring);
+            }
+        }
+
+        function resetRing(ring, zPos) {
+            ring.position.set((Math.random() - 0.5) * 150, Math.random() * 50 + 40, zPos);
+        }
+
+        window.addEventListener('keydown', (e) => keys[e.code] = true);
+        window.addEventListener('keyup', (e) => keys[e.code] = false);
+
+        window.startGame = function(selectedSpeed, distance, selectedRadius) {
+            speed = selectedSpeed;
+            goalDistance = distance;
+            ringRadius = selectedRadius;
+            createRings(ringRadius);
+            gameStarted = true;
+            document.getElementById('menu').style.display = 'none';
+            document.getElementById('ui').style.display = 'block';
+            document.getElementById('progress-container').style.display = 'block';
+        };
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (gameStarted) {
+                airplane.position.z -= speed;
+                const traveled = Math.abs(airplane.position.z);
+                const progress = Math.min((traveled / goalDistance) * 100, 100);
+                document.getElementById('progress-bar').style.width = progress + '%';
+
+                if (traveled >= goalDistance) {
+                    gameStarted = false;
+                    document.getElementById('result').style.display = 'flex';
+                    document.getElementById('final-score').innerText = "TOTAL SCORE: " + score;
+                }
+
+                // 操作感（長距離なので少し滑らかに）
+                const moveSpeed = speed * 0.7;
+                if (keys['ArrowUp']) airplane.position.y += moveSpeed;
+                if (keys['ArrowDown'] && airplane.position.y > 15) airplane.position.y -= moveSpeed;
+                if (keys['ArrowLeft']) airplane.position.x -= moveSpeed;
+                if (keys['ArrowRight']) airplane.position.x += moveSpeed;
+
+                airplane.rotation.x = THREE.MathUtils.lerp(airplane.rotation.x, (keys['ArrowUp'] ? 0.2 : keys['ArrowDown'] ? -0.2 : 0), 0.08);
+                airplane.rotation.z = THREE.MathUtils.lerp(airplane.rotation.z, (keys['ArrowLeft'] ? -0.5 : keys['ArrowRight'] ? 0.5 : 0), 0.08);
+
+                camera.position.set(airplane.position.x, airplane.position.y + 6, airplane.position.z + 30);
+                camera.lookAt(airplane.position.x, airplane.position.y, airplane.position.z - 20);
+
+                // 背景とリングのリサイクル
+                cityGroup.children.forEach(b => { if (b.position.z > airplane.position.z + 200) b.position.z -= 8000; });
+                rings.forEach(ring => {
+                    const hitZone = ringRadius + 2;
+                    if (airplane.position.distanceTo(ring.position) < hitZone) {
+                        score += 100;
+                        document.getElementById('score').innerText = score;
+                        resetRing(ring, airplane.position.z - 3000);
+                    }
+                    if (ring.position.z > airplane.position.z + 100) resetRing(ring, airplane.position.z - 3000);
+                });
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
